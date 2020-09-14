@@ -1,14 +1,14 @@
 model_name: efficientdet
 data:
-  train_annotation_path: /home/huffman/data/annotations/instances_train2017.json
-  #  train_annotation_path: /home/huffman/data/annotations/instances_val2017.json
+#  train_annotation_path: /home/huffman/data/annotations/instances_train2017.json
+  train_annotation_path: /home/huffman/data/annotations/instances_val2017.json
   val_annotation_path: /home/huffman/data/annotations/instances_val2017.json
-  train_img_root: /home/huffman/data/train2017
-  #  train_img_root: /home/huffman/data/val2017
+#  train_img_root: /home/huffman/data/train2017
+  train_img_root: /home/huffman/data/val2017
   val_img_root: /home/huffman/data/val2017
   use_crowd: False
-  batch_size: 12
-  num_workers: 4
+  batch_size: 32
+  num_workers: 8
   debug: False
   remove_blank: Ture
 
@@ -30,7 +30,7 @@ optim:
   optimizer: Adam
   lr: 0.001
   momentum: 0.9
-  milestones: [30,50,60]
+  milestones: [30,60]
   cosine_weights: 1.0
   warm_up_epoch: 0.
   max_norm: 5
@@ -44,4 +44,4 @@ val:
   iou_thresh: 0.5
   max_det: 300
 
-gpus: 4,5,6,7
+gpus: 6,7

@@ -87,9 +87,6 @@ class DDPApexProcessor(object):
         self.optimizer = optimizer
         self.ema = ModelEMA(self.model)
 
-        beta = eval(self.hyper_params['beta']) if isinstance(self.hyper_params['beta'], str) \
-            else self.hyper_params['beta']
-
         self.creterion = RetinaLoss(iou_thresh=self.hyper_params['iou_thresh'],
                                     ignore_thresh=self.hyper_params['ignore_thresh'],
                                     alpha=self.hyper_params['alpha'],
