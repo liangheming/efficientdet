@@ -1,13 +1,26 @@
 import torch
-from nets.efficientnet import EfficientNet
-from nets.efficientdet import BiFPN
+from nets.efficientdet import EfficientDet
+from losses.anchor_losses import RetinaLoss
+from datasets.coco import COCODataSets
+from torch.utils.data.dataloader import DataLoader
 
 if __name__ == '__main__':
-    input_tensor = torch.rand(size=(1, 3, 640, 640))
-    model = EfficientNet.from_pretrained('efficientnet-b1')
-    c3, c4, c5 = model.out_channels
-    out = model(input_tensor)
-    fpn = BiFPN(c3, c4, c5, 64, 3)
-    out = fpn(out)
-    for item in out:
-        print(item.shape)
+    dataset = COCODataSets(img_root="/home/huffman/data/val2017",
+                           annotation_path="/home/huffman/data/annotations/instances_val2017.json",
+                           use_crowd=True,
+                           augments=True,
+                           remove_blank=True,
+                           img_size=512
+                           )
+    dataloader = DataLoader(dataset=dataset, batch_size=4, shuffle=True, num_workers=4, collate_fn=dataset.collate_fn)
+    net = EfficientDet(compound_coef=0)
+    creterion = RetinaLoss()
+    for img_input, targets, _ in dataloader:
+        _, _, h, w = img_input.shape
+        targets[:, 3:] = targets[:, 3:] * torch.tensor(data=[w, h, w, h])
+        cls_outputs, reg_outputs, anchors = net(img_input)
+        total_loss, detail_loss, pos_num = creterion(cls_outputs, reg_outputs, anchors, targets)
+        cls_loss, reg_loss = detail_loss
+        print(total_loss)
+        print(cls_loss, reg_loss, pos_num)
+        break

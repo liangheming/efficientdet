@@ -5,15 +5,14 @@ import numpy as np
 import torch.distributed as dist
 from tqdm import tqdm
 from torch import nn
-
-from apex import amp
+from torch.cuda import amp
 from torch.utils.data.distributed import DistributedSampler
 from datasets.coco import COCODataSets
 from nets.efficientdet import EfficientDet
 from losses.anchor_losses import RetinaLoss
 from torch.utils.data.dataloader import DataLoader
 from utils.retinanet import non_max_suppression
-from commons.model_utils import rand_seed, is_parallel, ModelEMA, freeze_bn
+from commons.model_utils import rand_seed, ModelEMA, freeze_bn
 from metrics.map import coco_map
 from torch.nn.functional import interpolate
 from commons.optims_utils import WarmUpCosineDecayMultiStepLRAdjust, split_optimizer
@@ -70,12 +69,8 @@ class DDPApexProcessor(object):
         print("train_iter: ", len(self.tloader), " | ",
               "val_iter: ", len(self.vloader))
         model = EfficientDet(num_cls=self.model_cfg['num_cls'],
-                             strides=self.model_cfg['strides'],
                              compound_coef=self.model_cfg['compound_coef']
                              )
-        if self.model_cfg.get("backbone_weight", None):
-            weights = torch.load(self.model_cfg['backbone_weight'])
-            model.load_backbone_weighs(weights)
         self.best_map = 0.
         self.best_map50 = 0.
         optimizer = split_optimizer(model, self.optim_cfg)
@@ -83,7 +78,7 @@ class DDPApexProcessor(object):
         self.local_rank = local_rank
         self.device = torch.device("cuda", local_rank)
         model.to(self.device)
-        model, optimizer = amp.initialize(model, optimizer, opt_level='O1', verbosity=0)
+        self.scaler = amp.GradScaler(enabled=True)
         if self.optim_cfg['sync_bn']:
             model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
         self.model = nn.parallel.distributed.DistributedDataParallel(model,
@@ -99,7 +94,8 @@ class DDPApexProcessor(object):
                                     ignore_thresh=self.hyper_params['ignore_thresh'],
                                     alpha=self.hyper_params['alpha'],
                                     gamma=self.hyper_params['gamma'],
-                                    beta=beta,
+                                    iou_type=self.hyper_params['iou_type'],
+                                    coord_type=self.hyper_params['coord_type']
                                     )
         self.lr_adjuster = WarmUpCosineDecayMultiStepLRAdjust(init_lr=self.optim_cfg['lr'],
                                                               milestones=self.optim_cfg['milestones'],
@@ -130,16 +126,17 @@ class DDPApexProcessor(object):
                 img_tensor = img_tensor.to(self.device)
                 targets_tensor = targets_tensor.to(self.device)
             self.optimizer.zero_grad()
-            cls_predicts, reg_predicts, anchors = self.model(img_tensor)
-            total_loss, detail_loss, total_num = self.creterion(cls_predicts, reg_predicts, anchors, targets_tensor)
+            with amp.autocast(enabled=True):
+                cls_predicts, reg_predicts, anchors = self.model(img_tensor)
+                total_loss, detail_loss, total_num = self.creterion(cls_predicts, reg_predicts, anchors, targets_tensor)
+            self.scaler.scale(total_loss).backward()
             match_num += total_num
-            with amp.scale_loss(total_loss, self.optimizer) as scaled_loss:
-                scaled_loss.backward()
             # nn.utils.clip_grad_norm_(amp.master_params(self.optimizer), max_norm=self.optim_cfg['max_norm'],
             #                          norm_type=2)
             self.lr_adjuster(self.optimizer, i, epoch)
             lr = self.optimizer.param_groups[0]['lr']
-            self.optimizer.step()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
             self.ema.update(self.model)
             loss_cls, loss_reg = detail_loss
             loss_list[0].append(total_loss.item())
@@ -149,7 +146,7 @@ class DDPApexProcessor(object):
                 pbar.set_description(
                     "epoch:{:2d}|match_num:{:4d}|size:{:3d}|target_loss:{:6.4f}|loss_cls:{:6.4f}|loss_reg:{:6.4f}|lr:{:8.6f}".format(
                         epoch + 1,
-                        total_num,
+                        int(total_num),
                         h,
                         total_loss.item(),
                         loss_cls.item(),
@@ -161,7 +158,7 @@ class DDPApexProcessor(object):
         print(
             "epoch:{:3d}|match_num:{:4d}|local:{:3d}|target_loss:{:6.4f}|loss_cls:{:6.4f}|loss_reg:{:6.4f}|lr:{:8.6f}"
                 .format(epoch + 1,
-                        match_num,
+                        int(match_num),
                         self.local_rank,
                         mean_loss_list[0],
                         mean_loss_list[1],
@@ -182,8 +179,7 @@ class DDPApexProcessor(object):
             targets_tensor[:, 3:] = targets_tensor[:, 3:] * torch.tensor(data=[w, h, w, h])
             img_tensor = img_tensor.to(self.device)
             targets_tensor = targets_tensor.to(self.device)
-            predicts = self.model(img_tensor)
-
+            predicts = self.ema.ema(img_tensor)
             for i in range(len(predicts)):
                 predicts[i][:, [0, 2]] = predicts[i][:, [0, 2]].clamp(min=0, max=w)
                 predicts[i][:, [1, 3]] = predicts[i][:, [1, 3]].clamp(min=0, max=h)
@@ -205,19 +201,18 @@ class DDPApexProcessor(object):
                       map50 * 100,
                       map * 100))
         last_weight_path = os.path.join(self.val_cfg['weight_path'],
-                                        "{:d}_{:s}_last.pth"
-                                        .format(self.local_rank, self.cfg['model_name']))
+                                        "{:s}_last.pth"
+                                        .format(self.cfg['model_name']))
         best_map_weight_path = os.path.join(self.val_cfg['weight_path'],
-                                            "{:d}_{:s}_best_map.pth"
-                                            .format(self.local_rank, self.cfg['model_name']))
+                                            "{:s}_best_map.pth"
+                                            .format(self.cfg['model_name']))
         best_map50_weight_path = os.path.join(self.val_cfg['weight_path'],
-                                              "{:d}_{:s}_best_map50.pth"
-                                              .format(self.local_rank, self.cfg['model_name']))
-        model_static = self.model.module.state_dict() if is_parallel(self.model) else self.model.state_dict()
+                                              "{:s}_best_map50.pth"
+                                              .format(self.cfg['model_name']))
+        # model_static = self.model.module.state_dict() if is_parallel(self.model) else self.model.state_dict()
 
         ema_static = self.ema.ema.state_dict()
         cpkt = {
-            "ori": model_static,
             "ema": ema_static,
             "map": map * 100,
             "epoch": epoch,

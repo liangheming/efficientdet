@@ -1,17 +1,7 @@
 import torch
 from utils.retinanet import BoxCoder
 from commons.boxs_utils import box_iou
-
-
-def smooth_l1_loss(predicts, target, beta=1. / 9):
-    """
-    very similar to the smooth_l1_loss from pytorch, but with
-    the extra beta parameter
-    """
-    n = torch.abs(predicts - target)
-    cond = n < beta
-    loss = torch.where(cond, 0.5 * n ** 2 / beta, n - 0.5 * beta)
-    return loss
+from losses.commons import IOULoss
 
 
 class RetinaLossBuilder(object):
@@ -57,13 +47,15 @@ class RetinaLossBuilder(object):
 
 
 class RetinaLoss(object):
-    def __init__(self, iou_thresh=0.5, ignore_thresh=0.4, alpha=0.25, gamma=2.0, beta=1. / 9):
+    def __init__(self, iou_thresh=0.5, ignore_thresh=0.4, alpha=0.25, gamma=2.0,
+                 iou_type="giou",
+                 coord_type="xyxy"):
         self.iou_thresh = iou_thresh
         self.ignore_thresh = ignore_thresh
         self.alpha = alpha
         self.gama = gamma
-        self.beta = beta
         self.builder = RetinaLossBuilder(iou_thresh, ignore_thresh)
+        self.iou_loss = IOULoss(iou_type, coord_type)
         self.box_coder = BoxCoder()
 
     def __call__(self, cls_predicts, reg_predicts, anchors, targets):
@@ -110,10 +102,10 @@ class RetinaLoss(object):
             cls_loss_list.append(cls_loss)
 
             valid_reg_predicts = batch_reg_predict[pos_idx, :]
+            predict_box = self.box_coder.decoder(valid_reg_predicts, all_anchors[pos_idx])
             gt_bbox = gt[pos_idx, 2:]
-            delta_targets = self.box_coder.encoder(all_anchors[pos_idx], gt_bbox)
-            reg_loss = smooth_l1_loss(valid_reg_predicts, delta_targets, beta=self.beta).sum()
-            reg_loss_list.append(reg_loss)
+            reg_loss = self.iou_loss(predict_box, gt_bbox)
+            reg_loss_list.append(reg_loss.sum())
 
         cls_loss_sum = torch.stack(cls_loss_list).sum()
         if pos_num_sum == 0:

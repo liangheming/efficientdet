@@ -30,117 +30,133 @@ class DWSConv2d(nn.Module):
         return x
 
 
-class FPNExtractor(nn.Module):
-    def __init__(self, c3, c4, c5, inner_channel, bias=False):
-        super(FPNExtractor, self).__init__()
-        self.c3_latent = nn.Sequential(
-            Conv2dDynamicSamePadding(c3, inner_channel, 1, bias=bias),
-            nn.BatchNorm2d(inner_channel, momentum=0.01, eps=1e-3)
-        )
-        self.c4_latent = nn.Sequential(
-            Conv2dDynamicSamePadding(c4, inner_channel, 1, bias=bias),
-            nn.BatchNorm2d(inner_channel, momentum=0.01, eps=1e-3)
-        )
-
-        self.c5_latent = nn.Sequential(
-            Conv2dDynamicSamePadding(c5, inner_channel, 1, bias=bias),
-            nn.BatchNorm2d(inner_channel, momentum=0.01, eps=1e-3)
-        )
-
-        self.c5_to_p6 = nn.Sequential(
-            Conv2dDynamicSamePadding(c5, inner_channel, 3, 2, bias=bias),
-            nn.BatchNorm2d(inner_channel, momentum=0.01, eps=1e-3)
-        )
-
-        self.p6_to_p7 = nn.Sequential(
-            Conv2dDynamicSamePadding(inner_channel, inner_channel, 3, 2, bias=bias),
-            nn.BatchNorm2d(inner_channel, momentum=0.01, eps=1e-3)
-        )
-
-    def forward(self, x):
-        c3, c4, c5 = x
-        p3 = self.c3_latent(c3)
-        p4 = self.c4_latent(c4)
-        p5 = self.c5_latent(c5)
-        p6 = self.c5_to_p6(c5)
-        p7 = self.p6_to_p7(p6)
-        return p3, p4, p5, p6, p7
-
-
-class Scale(nn.Module):
-    def __init__(self, weight_num=2, init_val=1.0, requires_grad=True):
-        super(Scale, self).__init__()
+class ScaleWeight(nn.Module):
+    def __init__(self, weight_num=2, init_val=1.0, requires_grad=True, eps=1e-4):
+        super(ScaleWeight, self).__init__()
         weights = torch.ones(size=(weight_num,)) * init_val
+        self.eps = eps
         self.weights = nn.Parameter(weights, requires_grad=requires_grad)
 
     def forward(self, xs):
         assert len(self.weights) == len(xs)
         positive_weights = self.weights.relu()
-        ret = list()
+        positive_weights = positive_weights / positive_weights.sum() + self.eps
+        ret = 0.
         for w, x in zip(positive_weights, xs):
-            ret.append(w * x)
-        ret = torch.stack(ret, dim=-1).sum(dim=-1) / (positive_weights.sum() + 1e-4)
+            ret += (w * x)
         return ret
 
 
 class BiFPNLayer(nn.Module):
-    def __init__(self, inner_channels, weight_inputs=True):
+    def __init__(self, c3, c4, c5, inner_channels, weight_inputs=True, first=False):
         super(BiFPNLayer, self).__init__()
+        self.first = first
+        if self.first:
+            self.c3_latent = nn.Sequential(
+                Conv2dDynamicSamePadding(c3, inner_channels, 1),
+                nn.BatchNorm2d(inner_channels, momentum=0.01, eps=1e-3)
+            )
+            self.c4_latent = nn.Sequential(
+                Conv2dDynamicSamePadding(c4, inner_channels, 1),
+                nn.BatchNorm2d(inner_channels, momentum=0.01, eps=1e-3)
+            )
+
+            self.c5_latent = nn.Sequential(
+                Conv2dDynamicSamePadding(c5, inner_channels, 1),
+                nn.BatchNorm2d(inner_channels, momentum=0.01, eps=1e-3)
+            )
+
+            self.c5_to_p6 = nn.Sequential(
+                Conv2dDynamicSamePadding(c5, inner_channels, 1),
+                nn.BatchNorm2d(inner_channels, momentum=0.01, eps=1e-3),
+                MaxPool2dDynamicSamePadding(3, 2)
+            )
+
+            self.p6_to_p7 = nn.Sequential(
+                MaxPool2dDynamicSamePadding(3, 2)
+            )
+
+            self.c4_latent_re = nn.Sequential(
+                Conv2dDynamicSamePadding(c4, inner_channels, 1),
+                nn.BatchNorm2d(inner_channels, momentum=0.01, eps=1e-3)
+            )
+
+            self.c5_latent_re = nn.Sequential(
+                Conv2dDynamicSamePadding(c5, inner_channels, 1),
+                nn.BatchNorm2d(inner_channels, momentum=0.01, eps=1e-3)
+            )
+
         self.p6_0 = DWSConv2d(inner_channels, inner_channels, act=False)
-        self.p6_0_scale = Scale(2, requires_grad=weight_inputs)
+        self.p6_0_scale = ScaleWeight(2, requires_grad=weight_inputs)
 
         self.p5_0 = DWSConv2d(inner_channels, inner_channels, act=False)
-        self.p5_0_scale = Scale(2, requires_grad=weight_inputs)
+        self.p5_0_scale = ScaleWeight(2, requires_grad=weight_inputs)
 
         self.p4_0 = DWSConv2d(inner_channels, inner_channels, act=False)
-        self.p4_0_scale = Scale(2, requires_grad=weight_inputs)
+        self.p4_0_scale = ScaleWeight(2, requires_grad=weight_inputs)
 
         self.p3_1 = DWSConv2d(inner_channels, inner_channels, act=False)
-        self.p3_1_scale = Scale(2, requires_grad=weight_inputs)
+        self.p3_1_scale = ScaleWeight(2, requires_grad=weight_inputs)
 
         self.p4_1 = DWSConv2d(inner_channels, inner_channels, act=False)
-        self.p4_1_scale = Scale(3, requires_grad=weight_inputs)
+        self.p4_1_scale = ScaleWeight(3, requires_grad=weight_inputs)
 
         self.p5_1 = DWSConv2d(inner_channels, inner_channels, act=False)
-        self.p5_1_scale = Scale(3, requires_grad=weight_inputs)
+        self.p5_1_scale = ScaleWeight(3, requires_grad=weight_inputs)
 
         self.p6_1 = DWSConv2d(inner_channels, inner_channels, act=False)
-        self.p6_1_scale = Scale(3, requires_grad=weight_inputs)
+        self.p6_1_scale = ScaleWeight(3, requires_grad=weight_inputs)
 
         self.p7_1 = DWSConv2d(inner_channels, inner_channels, act=False)
-        self.p7_1_scale = Scale(2, requires_grad=weight_inputs)
+        self.p7_1_scale = ScaleWeight(2, requires_grad=weight_inputs)
 
         self.up_sample = nn.UpsamplingNearest2d(scale_factor=2)
         self.down_sample = MaxPool2dDynamicSamePadding(3, 2)
         self.act = MemoryEfficientSwish()
 
     def forward(self, xs):
-        p3_in, p4_in, p5_in, p6_in, p7_in = xs
+        c3, c4, c5 = xs[:3]
+        if self.first:
+            p3_in = self.c3_latent(c3)
+            p4_in = self.c4_latent(c4)
+            p5_in = self.c5_latent(c5)
+            p6_in = self.c5_to_p6(c5)
+            p7_in = self.p6_to_p7(p6_in)
+        else:
+            p3_in = c3
+            p4_in = c4
+            p5_in = c5
+            p6_in, p7_in = xs[3:]
         p6_0 = self.p6_0(self.act(self.p6_0_scale([self.up_sample(p7_in), p6_in])))
         p5_0 = self.p5_0(self.act(self.p5_0_scale([self.up_sample(p6_0), p5_in])))
         p4_0 = self.p4_0(self.act(self.p4_0_scale([self.up_sample(p5_0), p4_in])))
         p3_out = self.p3_1(self.act(self.p3_1_scale([self.up_sample(p4_0), p3_in])))
+        if self.first:
+            # reference to https://github.com/zylo117/Yet-Another-EfficientDet-Pytorch
+            p4_in = self.c4_latent_re(c4)
+            p5_in = self.c5_latent_re(c5)
         p4_out = self.p4_1(self.act(self.p4_1_scale([self.down_sample(p3_out), p4_0, p4_in])))
         p5_out = self.p5_1(self.act(self.p5_1_scale([self.down_sample(p4_out), p5_0, p5_in])))
         p6_out = self.p6_1(self.act(self.p6_1_scale([self.down_sample(p5_out), p6_0, p6_in])))
         p7_out = self.p7_1(self.act(self.p7_1_scale([self.down_sample(p6_out), p7_in])))
-        return p3_out, p4_out, p5_out, p6_out, p7_out
+        return [p3_out, p4_out, p5_out, p6_out, p7_out]
 
 
 class BiFPN(nn.Module):
     def __init__(self, c3, c4, c5, inner_channels, repeat_times, weight_input=True):
         super(BiFPN, self).__init__()
-        self.fpn_extractor = FPNExtractor(c3, c4, c5, inner_channels)
         self.bi_fpn = list()
         for i in range(repeat_times):
-            self.bi_fpn.append(BiFPNLayer(inner_channels, weight_input))
+            if i == 0:
+                self.bi_fpn.append(BiFPNLayer(c3, c4, c5, inner_channels, weight_input, first=True))
+            else:
+                self.bi_fpn.append(BiFPNLayer(c3, c4, c5, inner_channels, weight_input, first=False))
         self.bi_fpn = nn.Sequential(*self.bi_fpn)
 
     def forward(self, xs):
-        p3, p4, p5, p6, p7 = self.fpn_extractor(xs)
         for fpn in self.bi_fpn:
-            p3, p4, p5, p6, p7 = fpn([p3, p4, p5, p6, p7])
-        return p3, p4, p5, p6, p7
+            xs = fpn(xs)
+        return xs
 
 
 class ClsHead(nn.Module):
@@ -338,7 +354,7 @@ class EfficientDet(nn.Module):
         return out
 
 # if __name__ == '__main__':
-#     input_tensor = torch.rand(size=(4, 3, 640, 640)).float()
+#     input_tensor = torch.rand(size=(4, 3, 512, 512)).float()
 #     net = EfficientDet()
 #     mcls_output, mreg_output, manchor = net(input_tensor)
 #     for cls_out, reg_out, anchor_out in zip(mcls_output, mreg_output, manchor):

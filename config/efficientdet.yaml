@@ -14,7 +14,6 @@ data:
 
 model:
   num_cls: 80
-  strides: [8, 16, 32, 64, 128]
   freeze_bn: False
   compound_coef: 0
 
@@ -23,8 +22,9 @@ hyper_params:
   ignore_thresh: 0.4
   alpha: 0.25
   gamma: 1.5
-  beta: 1./9
   multi_scale: [512]
+  iou_type: giou
+  coord_type: xyxy
 
 optim:
   optimizer: Adam
